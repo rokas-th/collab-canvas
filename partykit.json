@@ -1,0 +1,6 @@
+{
+  "$schema": "https://www.partykit.io/schema.json",
+  "name": "collab-canvas",
+  "main": "party/whiteboard.ts",
+  "compatibilityDate": "2026-01-01"
+}
