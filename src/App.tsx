@@ -1,10 +1,28 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent,
+  type ReactNode,
+} from 'react';
+import { ArrivalRing, Cursor, EdgeWash } from './Cursors';
+import { InkPath } from './InkPath';
+import { Dots, Mirror, type MirrorMode, type Verify } from './Mirror';
+import { MIN_PEN_PX, penSize } from './pen';
+import { useArrivals } from './useArrivals';
+import { useMirror } from './useMirror';
 import { BOARD, useWhiteboard, type Status, type Stroke } from './useWhiteboard';
 
 const PORTFOLIO_URL = 'https://rokass.org/work/collab-canvas/';
 const SOURCE_URL = 'https://github.com/rokas-th/collab-canvas';
 const CLEARED_PILL_MS = 5000;
 const COPIED_MS = 1600;
+const UNFOLD_MS = 2000;
+const FLASH_MS = 420;
+const VERIFIED_MS = 1800;
 
 function getRoom(): string {
   const url = new URL(window.location.href);
@@ -17,18 +35,11 @@ function getRoom(): string {
   return room;
 }
 
-function toPolyline(points: number[]): string {
-  let s = '';
-  for (let i = 0; i < points.length; i += 2) s += `${points[i]},${points[i + 1]} `;
-  return s.trim();
-}
-
 const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
 const round1 = (v: number) => Math.round(v * 10) / 10;
+const pressureOf = (e: PointerEvent) => Math.round(clamp(e.pressure, 0, 1) * 100) / 100;
 
 const MAX_ZOOM = 6;
-const MIN_STROKE_PX = 3;
-const STROKE_WIDTH = 4;
 
 interface View {
   k: number;
@@ -75,6 +86,20 @@ const STATUS_META: Record<Status, { color: string; label: string; pill: string |
 
 const STATUSES = Object.keys(STATUS_META) as Status[];
 
+type HintKey = 'connecting' | 'reconnecting' | 'mirror' | 'plain' | 'failed';
+
+const HINT: Record<HintKey, string> = {
+  connecting: 'Connecting to the room. Start drawing now: your strokes sync as soon as it is live.',
+  reconnecting: 'The connection dropped and is coming back. Keep drawing: your strokes sync when it is live again.',
+  mirror:
+    'The small screen in the corner is a second connection to this room. It shows what anyone you share the link with would see.',
+  plain: 'Open this room in a second tab or on your phone. Strokes and cursors show up there as you draw.',
+  failed:
+    'The realtime server can’t be reached, so only tabs in this browser see this board. It reconnects on its own.',
+};
+
+const HINT_KEYS = Object.keys(HINT) as HintKey[];
+
 type ShareState = 'idle' | 'copied' | 'manual';
 
 function Swap<K extends string>({ active, options }: { active: K; options: [K, ReactNode][] }) {
@@ -103,8 +128,23 @@ const MONO_LABEL = 'font-mono text-[10px] uppercase tracking-[0.2em] text-black/
 
 export default function App() {
   const [room] = useState(getRoom);
-  const { strokes, peers, status, me, canUndo, addStroke, clear, undo, redo, setCursor, clearCursor } =
-    useWhiteboard(room);
+  const {
+    strokes,
+    malformed,
+    peers,
+    status,
+    synced,
+    me,
+    canUndo,
+    outbox,
+    addStroke,
+    clear,
+    undo,
+    redo,
+    setCursor,
+    clearCursor,
+    setDraft,
+  } = useWhiteboard(room);
 
   const [pen, setPen] = useState('');
   const penColor = pen || me.color;
@@ -116,13 +156,25 @@ export default function App() {
   const touches = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<Gesture | null>(null);
   const pointerId = useRef<number | null>(null);
-  const currentRef = useRef<number[]>([]);
-  const [current, setCurrent] = useState<number[]>([]);
+  const currentRef = useRef<Stroke | null>(null);
+  const [current, setCurrent] = useState<Stroke | null>(null);
 
   const [started, setStarted] = useState(false);
   const [cleared, setCleared] = useState(false);
   const [shareState, setShareState] = useState<ShareState>('idle');
   const shareInputRef = useRef<HTMLInputElement>(null);
+
+  const [everSynced, setEverSynced] = useState(false);
+  if (synced && !everSynced) setEverSynced(true);
+  const live = status === 'connected' && synced;
+  const [folded, setFolded] = useState(false);
+  const [mirrorH, setMirrorH] = useState(0);
+  const [verify, setVerify] = useState<Verify>(null);
+  const [notice, setNotice] = useState('');
+  const verifiedOnce = useRef(false);
+  const verifyTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
+
+  const arrivals = useArrivals(peers, everSynced);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -135,6 +187,49 @@ export default function App() {
     observer.observe(svg);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(() => {
+    if (!live) return;
+    if (peers.length > 0) {
+      setFolded(true);
+      return;
+    }
+    const t = setTimeout(() => setFolded(false), UNFOLD_MS);
+    return () => clearTimeout(t);
+  }, [live, peers.length]);
+
+  useEffect(() => {
+    const pending = verifyTimers.current;
+    return () => pending.forEach(clearTimeout);
+  }, []);
+
+  const onMark = useCallback(() => {
+    if (verifiedOnce.current) return;
+    verifiedOnce.current = true;
+    const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    setVerify(still ? 'verified' : 'flash');
+    setNotice('Sync verified: the second connection received your ink through the server.');
+    const later = (ms: number, next: Verify) => {
+      const t = setTimeout(() => {
+        verifyTimers.current.delete(t);
+        setVerify(next);
+      }, ms);
+      verifyTimers.current.add(t);
+    };
+    if (!still) later(FLASH_MS, 'verified');
+    later(VERIFIED_MS, null);
+  }, []);
+
+  const mirrorOff = peers.length > 0 || folded;
+  const mirror = useMirror(room, outbox, everSynced && !mirrorOff && status !== 'failed', onMark);
+  const mirrorMode: MirrorMode =
+    status === 'failed' ? 'unreachable' : mirrorOff ? 'off' : mirror.status === 'failed' ? 'unreachable' : 'live';
+  const mirrorReason = status === 'failed' ? 'server unreachable' : 'the mirror can’t connect';
+  const mirrorCaption = mirror.synced
+    ? `${mirror.rtt === null ? '—' : mirror.rtt < 10 ? mirror.rtt.toFixed(1) : Math.round(mirror.rtt)} ms via PartyKit`
+    : status === 'reconnecting' || mirror.status === 'reconnecting'
+      ? 'reconnecting to PartyKit…'
+      : 'connecting to PartyKit…';
 
   const undoLast = useCallback(() => {
     undo();
@@ -194,10 +289,16 @@ export default function App() {
     return { anchor: { x: anchor.x, y: anchor.y }, distance: Math.hypot(a.x - b.x, a.y - b.y) };
   };
 
+  const track = (stroke: Stroke | null) => {
+    currentRef.current = stroke;
+    setCurrent(stroke);
+  };
+
   const abortStroke = () => {
     pointerId.current = null;
-    currentRef.current = [];
-    setCurrent([]);
+    if (!currentRef.current) return;
+    track(null);
+    setDraft(null);
   };
 
   const onDown = (e: PointerEvent<SVGSVGElement>) => {
@@ -215,8 +316,14 @@ export default function App() {
     if (!inside) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     pointerId.current = e.pointerId;
-    currentRef.current = [x, y];
-    setCurrent(currentRef.current);
+    const stroke: Stroke = {
+      id: crypto.randomUUID(),
+      color: penColor,
+      points: [x, y],
+      ...(e.pointerType === 'pen' ? { pressure: [pressureOf(e)] } : {}),
+    };
+    track(stroke);
+    setDraft(stroke);
     setStarted(true);
     setCleared(false);
   };
@@ -237,11 +344,21 @@ export default function App() {
       if (start) return;
     }
     const { x, y, inside } = toBoard(e);
-    if (inside || pointerId.current !== null) setCursor(x, y);
+    if (pointerId.current === e.pointerId) {
+      const prev = currentRef.current;
+      if (!prev) throw new Error('Pointer is drawing without a stroke in progress');
+      const next: Stroke = {
+        ...prev,
+        points: [...prev.points, x, y],
+        ...(prev.pressure ? { pressure: [...prev.pressure, pressureOf(e)] } : {}),
+      };
+      track(next);
+      setDraft(next);
+      return;
+    }
+    if (pointerId.current !== null) return;
+    if (inside) setCursor(x, y);
     else clearCursor();
-    if (pointerId.current !== e.pointerId) return;
-    currentRef.current = [...currentRef.current, x, y];
-    setCurrent(currentRef.current);
   };
 
   const finish = (e: PointerEvent<SVGSVGElement>) => {
@@ -251,16 +368,15 @@ export default function App() {
     }
     if (pointerId.current !== e.pointerId) return;
     pointerId.current = null;
-    const points = currentRef.current;
-    currentRef.current = [];
-    setCurrent([]);
-    if (points.length < 2) return;
-    const stroke: Stroke = {
-      id: crypto.randomUUID(),
-      color: penColor,
-      points: points.length === 2 ? [...points, ...points] : points,
-    };
-    addStroke(stroke);
+    const stroke = currentRef.current;
+    if (!stroke) throw new Error('Pointer finished without a stroke in progress');
+    track(null);
+    const dot = stroke.points.length === 2;
+    addStroke({
+      ...stroke,
+      points: dot ? [...stroke.points, ...stroke.points] : stroke.points,
+      ...(stroke.pressure ? { pressure: dot ? [...stroke.pressure, ...stroke.pressure] : stroke.pressure } : {}),
+    });
   };
 
   const onLeave = () => {
@@ -300,14 +416,27 @@ export default function App() {
   };
 
   const statusMeta = STATUS_META[status];
-  const showHint = !started && strokes.length === 0 && peers.length === 0;
+  const unfolding = live && peers.length === 0 && folded;
+  const showHint = !started && strokes.length === 0 && peers.length === 0 && !unfolding;
+  const liveHint: HintKey = status === 'connected' ? (mirrorMode === 'live' ? 'mirror' : 'plain') : status;
+  const [hintKey, setHintKey] = useState(liveHint);
+  if (showHint && hintKey !== liveHint) setHintKey(liveHint);
+  const tabFirst = hintKey === 'plain' || hintKey === 'failed';
+  const offline = status === 'failed';
+  const badInk = peers.filter((p) => p.badInk).map((p) => p.name);
   const onScreen = scale * view.k;
   const cursorScale = 1 / onScreen;
-  const strokeWidth = round1(Math.max(STROKE_WIDTH, MIN_STROKE_PX / onScreen));
+  const size = penSize(onScreen, MIN_PEN_PX);
+  const floor = MIN_PEN_PX / onScreen;
   const zoomed = view.k !== 1 || view.x !== 0 || view.y !== 0;
+  const committed = useMemo(() => new Set(strokes.map((s) => s.id)), [strokes]);
+  const presentColors = [me.color, ...peers.map((p) => p.color)];
 
   return (
-    <main className="relative h-dvh w-full touch-none select-none overflow-hidden bg-[#ecebe6]">
+    <main
+      className="relative h-dvh w-full touch-none select-none overflow-hidden bg-[#ecebe6]"
+      style={{ '--mirror-h': `${mirrorH}px` } as CSSProperties}
+    >
       <svg
         ref={svgRef}
         role="img"
@@ -337,44 +466,52 @@ export default function App() {
             vectorEffect="non-scaling-stroke"
           />
 
-          {strokes.map((s) => (
-            <polyline
-              key={s.id}
-              points={toPolyline(s.points)}
-              stroke={s.color}
-              fill="none"
-              strokeWidth={strokeWidth}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          ))}
+          <g data-layer="committed">
+            {strokes.map((s) => (
+              <InkPath key={s.id} stroke={s} size={size} floor={floor} layer="committed" />
+            ))}
+          </g>
 
-          {current.length >= 2 && (
-            <polyline
-              points={toPolyline(current.length === 2 ? [...current, ...current] : current)}
-              stroke={penColor}
-              fill="none"
-              strokeWidth={strokeWidth}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          )}
+          <g data-layer="draft">
+            {peers.map(({ id, draft }) =>
+              draft && !committed.has(draft.id) ? (
+                <InkPath key={id} stroke={draft} size={size} floor={floor} layer="draft" />
+              ) : null,
+            )}
+          </g>
+
+          {current && <InkPath stroke={current} size={size} floor={floor} layer="own" />}
+
+          {arrivals.rings.map((ring) => (
+            <ArrivalRing key={ring.key} ring={ring} scale={cursorScale} onDone={arrivals.dropRing} />
+          ))}
 
           {peers.map(({ id, name, color, cursor }) =>
             cursor ? (
-              <g key={id} transform={`translate(${cursor.x}, ${cursor.y}) scale(${cursorScale})`} pointerEvents="none">
-                <path d="M0 0 L0 16 L4.5 12 L7 17 L9 16 L6.5 11 L12 11 Z" fill={color} stroke="white" strokeWidth={1} />
-                <rect x="12" y="10" rx="3" width={name.length * 7 + 12} height="18" fill={color} />
-                <text x="18" y="23" fontSize="11" fill="white" fontFamily="ui-sans-serif, system-ui">
-                  {name}
-                </text>
-              </g>
+              <Cursor
+                key={id}
+                name={name}
+                color={color}
+                x={cursor.x}
+                y={cursor.y}
+                scale={cursorScale}
+                joining={arrivals.joining.has(id)}
+              />
             ) : null,
+          )}
+
+          {arrivals.wash && (
+            <EdgeWash
+              key={arrivals.wash.key}
+              wash={arrivals.wash}
+              width={BOARD.width}
+              height={BOARD.height}
+              inset={0.5 / onScreen}
+            />
           )}
         </g>
       </svg>
 
-      {/* Toolbar */}
       <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-wrap items-start justify-between gap-2 p-4 sm:gap-3">
         <div data-panel className={`${PANEL} flex-col items-stretch justify-center gap-0.5 px-4`}>
           <div className="flex items-center gap-4 whitespace-nowrap max-[359px]:gap-2">
@@ -407,9 +544,12 @@ export default function App() {
         </div>
 
         <div data-panel className={`${PANEL} relative gap-2 px-3 max-sm:justify-between max-[359px]:gap-1`}>
-          <span className="whitespace-nowrap text-xs text-black/60">
-            {peers.length + 1}
-            <span className="max-[359px]:sr-only"> online</span>
+          <span data-online className="flex items-center gap-1.5 whitespace-nowrap text-xs text-black/60">
+            <Dots colors={presentColors} />
+            <span>
+              {peers.length + 1}
+              <span className="max-[359px]:sr-only"> online</span>
+            </span>
           </span>
           <label className="flex items-center gap-1.5 text-xs text-black/60 pointer-coarse:h-10">
             <span className="max-sm:sr-only">Pen</span>
@@ -417,16 +557,21 @@ export default function App() {
               type="color"
               value={penColor}
               onChange={(e) => setPen(e.target.value)}
-              className="h-6 w-8 cursor-pointer rounded border border-black/10 bg-transparent pointer-coarse:h-8 pointer-coarse:w-10"
+              className="size-7 cursor-pointer appearance-none rounded-full border border-black/15 bg-transparent p-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black [&::-moz-color-swatch]:rounded-full [&::-moz-color-swatch]:border-none [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-none [&::-webkit-color-swatch-wrapper]:p-0"
             />
           </label>
           <button type="button" onClick={undoLast} disabled={!canUndo} className={GHOST_BUTTON}>
             Undo
           </button>
-          <button type="button" onClick={clearBoard} disabled={strokes.length === 0} className={GHOST_BUTTON}>
+          <button
+            type="button"
+            onClick={clearBoard}
+            disabled={strokes.length + malformed === 0}
+            className={GHOST_BUTTON}
+          >
             Clear
           </button>
-          <button type="button" onClick={share} className={SOLID_BUTTON}>
+          <button type="button" onClick={share} hidden={offline} className={SOLID_BUTTON}>
             {shareState === 'copied' ? 'Copied' : 'Share'}
           </button>
           <span className="sr-only" aria-live="polite">
@@ -457,50 +602,53 @@ export default function App() {
       </div>
 
       <div
-        data-hint
+        data-hint={hintKey}
         inert={!showHint}
         aria-hidden={!showHint}
-        className={`pointer-events-none absolute inset-0 flex items-end justify-center px-4 pb-24 transition-opacity duration-300 motion-reduce:transition-none sm:items-center sm:pb-0 ${showHint ? 'opacity-100' : 'opacity-0'}`}
+        className={`pointer-events-none absolute inset-0 flex items-end justify-center px-4 pb-[calc(var(--mirror-h)+64px)] transition-opacity duration-300 motion-reduce:transition-none sm:items-center sm:pb-[calc(var(--mirror-h)+16px)] ${showHint ? 'opacity-100' : 'opacity-0'}`}
       >
         <div className="w-full max-w-sm rounded-2xl border border-black/10 bg-white px-5 py-4 shadow-sm">
           <p className={MONO_LABEL}>Empty board</p>
           <p className="mt-1 text-lg font-semibold">Draw anywhere.</p>
           <p className="mt-1 text-sm text-black/70">
-            <Swap
-              active={status === 'failed' ? 'failed' : 'ok'}
-              options={[
-                [
-                  'ok',
-                  'Open this room in a second tab or on your phone. Strokes and cursors show up there as you draw.',
-                ],
-                [
-                  'failed',
-                  'The realtime server can’t be reached, so only tabs in this browser see this board. It reconnects on its own.',
-                ],
-              ]}
-            />
+            <Swap active={hintKey} options={HINT_KEYS.map((key) => [key, HINT[key]])} />
           </p>
           <p className="mt-1 hidden text-sm text-black/70 pointer-coarse:block">Pinch with two fingers to zoom in.</p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={openSecondTab}
-              className={`${SOLID_BUTTON} ${showHint ? 'pointer-events-auto' : ''}`}
-            >
-              Open second tab ↗
-            </button>
-            <button
-              type="button"
-              onClick={share}
-              className={`${GHOST_BUTTON} ${showHint ? 'pointer-events-auto' : ''}`}
-            >
-              {shareState === 'copied' ? 'Link copied' : 'Share link'}
-            </button>
+            {tabFirst && (
+              <button
+                type="button"
+                onClick={openSecondTab}
+                className={`${SOLID_BUTTON} ${showHint ? 'pointer-events-auto' : ''}`}
+              >
+                Open second tab ↗
+              </button>
+            )}
+            {hintKey !== 'failed' && (
+              <button
+                type="button"
+                onClick={share}
+                className={`${tabFirst ? GHOST_BUTTON : SOLID_BUTTON} ${showHint ? 'pointer-events-auto' : ''}`}
+              >
+                {shareState === 'copied' ? 'Link copied' : 'Share link'}
+              </button>
+            )}
           </div>
         </div>
       </div>
 
       <div className="pointer-events-none absolute inset-x-0 bottom-[max(1rem,env(safe-area-inset-bottom))] flex flex-col items-center gap-2 px-4">
+        <Mirror
+          mode={mirrorMode}
+          reason={mirrorReason}
+          caption={mirrorCaption}
+          strokes={mirror.strokes}
+          peers={mirror.peers}
+          verify={verify}
+          devices={peers.length + 1}
+          colors={presentColors}
+          onCardHeight={setMirrorH}
+        />
         {zoomed && (
           <button
             type="button"
@@ -522,6 +670,18 @@ export default function App() {
             </button>
           </p>
         )}
+        {malformed > 0 && (
+          <p role="alert" className="max-w-full rounded-full bg-black/80 px-3 py-1.5 text-center text-xs text-white">
+            {malformed === 1
+              ? '1 stroke in this room is malformed, so it isn’t drawn.'
+              : `${malformed} strokes in this room are malformed, so they aren’t drawn.`}
+          </p>
+        )}
+        {badInk.length > 0 && (
+          <p role="alert" className="max-w-full rounded-full bg-black/80 px-3 py-1.5 text-center text-xs text-white">
+            Live ink from {badInk.join(' and ')} is malformed, so it isn’t shown.
+          </p>
+        )}
         <p
           role="status"
           className={`max-w-full rounded-full bg-black/75 px-3 py-1.5 text-center text-xs text-white ${statusMeta.pill ? '' : 'hidden'}`}
@@ -537,6 +697,13 @@ export default function App() {
           />
         </p>
       </div>
+
+      <p className="sr-only" aria-live="polite">
+        {arrivals.announcement}
+      </p>
+      <p className="sr-only" aria-live="polite">
+        {notice}
+      </p>
     </main>
   );
 }
