@@ -93,8 +93,23 @@ export interface RoomConnection {
   close: () => void;
 }
 
+function forwardOwnPresenceOnly(provider: YProvider) {
+  const { awareness } = provider;
+  const own = provider.doc.clientID;
+  const forwardAll = provider._awarenessUpdateHandler;
+  if (!awareness._observers.get('change')?.has(forwardAll) || awareness._observers.get('update')?.has(forwardAll))
+    throw new Error('y-partyserver no longer forwards presence on "change"; review forwardOwnPresenceOnly in src/connection.ts.');
+  const forwardOwn: typeof forwardAll = ({ added, updated, removed }, origin) => {
+    if ([...added, ...updated, ...removed].includes(own)) forwardAll({ added: [], updated: [own], removed: [] }, origin);
+  };
+  awareness.off('change', forwardAll);
+  awareness.on('change', forwardOwn);
+  provider._awarenessUpdateHandler = forwardOwn;
+}
+
 export function openRoom(room: string, doc: Y.Doc, options: ProviderOptions = {}): RoomConnection {
   const provider = new YProvider(HOST, room, doc, { ...options, party: PARTY, connect: false });
+  forwardOwnPresenceOnly(provider);
   let settled = provider.connect();
   const after = (step: () => void | Promise<void>) => {
     settled = settled.then(step);
