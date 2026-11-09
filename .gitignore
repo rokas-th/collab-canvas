@@ -2,6 +2,7 @@ node_modules
 dist
 dist-ssr
 .partykit
+.wrangler
 *.local
 .DS_Store
 .vscode/*
