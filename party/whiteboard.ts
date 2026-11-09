@@ -1,5 +1,6 @@
 import { routePartykitRequest, type Connection } from 'partyserver';
 import { YServer } from 'y-partyserver';
+import { removeAwarenessStates } from 'y-protocols/awareness';
 import * as Y from 'yjs';
 
 const ROOM = /^[A-Za-z0-9_-]{1,64}$/;
@@ -25,10 +26,26 @@ const originAllowed = (origin: string, rules: string) =>
     .map((rule) => new RegExp(`^${rule.trim().split('*').map(escapeRegExp).join('[a-z0-9-]+')}$`))
     .some((pattern) => pattern.test(origin));
 
+interface PresenceChanges {
+  added: number[];
+  updated: number[];
+  removed: number[];
+}
+
+const isConnection = (origin: unknown): origin is Connection =>
+  typeof origin === 'object' && origin !== null && typeof (origin as Connection).id === 'string';
+
 export class Whiteboard extends YServer {
   static options = { hibernate: false };
 
   private rows = 0;
+  private presenceOwners = new Map<number, Connection>();
+
+  private trackPresence = ({ added, updated, removed }: PresenceChanges, origin: unknown) => {
+    if (!isConnection(origin)) return;
+    [...added, ...updated].forEach((client) => this.presenceOwners.set(client, origin));
+    removed.filter((client) => this.presenceOwners.get(client) === origin).forEach((client) => this.presenceOwners.delete(client));
+  };
 
   async onLoad() {
     const sql = this.ctx.storage.sql;
@@ -42,10 +59,13 @@ export class Whiteboard extends YServer {
     if (stored.length > 0) Y.applyUpdate(this.document, Y.mergeUpdates(stored));
     this.rows = updates.length;
     this.document.on('update', (update: Uint8Array) => this.persist(update));
+    this.document.awareness.on('update', this.trackPresence);
   }
 
-  onClose(connection: Connection, code: number, reason: string, wasClean: boolean) {
-    super.onClose(connection, code, reason, wasClean);
+  onClose(connection: Connection, code: number) {
+    const owned = [...this.presenceOwners].filter(([, owner]) => owner === connection).map(([client]) => client);
+    owned.forEach((client) => this.presenceOwners.delete(client));
+    if (owned.length > 0) removeAwarenessStates(this.document.awareness, owned, null);
     if (code === 1005) connection.close(1000, 'Closed');
   }
 
