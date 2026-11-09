@@ -50,9 +50,6 @@ export function useMirror(room: string, outbox: Outbox | null, enabled: boolean,
     awareness.setLocalState(null);
     const connection = openRoom(room, doc, { awareness, disableBc: true });
     const { provider } = connection;
-    awareness.off('change', provider._awarenessUpdateHandler);
-    if (['change', 'update'].some((event) => awareness._observers.get(event)?.has(provider._awarenessUpdateHandler)))
-      throw new Error('The mirror provider still forwards awareness; y-partyserver changed how it subscribes, review useMirror.');
     const yStrokes = doc.getArray<Stroke>('strokes');
     const drafts = new Map<number, Stroke>();
     const samples: number[] = [];
