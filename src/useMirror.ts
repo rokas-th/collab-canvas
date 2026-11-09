@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as Y from 'yjs';
-import YPartyKitProvider from 'y-partykit/provider';
 import { Awareness } from 'y-protocols/awareness';
-import { HOST, trackStatus, type Status } from './connection';
+import { openRoom, superviseConnection, type Status } from './connection';
 import { isStroke, readPeers, readStrokes, type Peer, type Stroke } from './presence';
 import type { Outbox } from './useWhiteboard';
 
@@ -49,8 +48,11 @@ export function useMirror(room: string, outbox: Outbox | null, enabled: boolean,
     const doc = new Y.Doc();
     const awareness = new Awareness(doc);
     awareness.setLocalState(null);
-    const provider = new YPartyKitProvider(HOST, room, doc, { awareness, disableBc: true });
-    awareness.off('update', provider._awarenessUpdateHandler);
+    const connection = openRoom(room, doc, { awareness, disableBc: true });
+    const { provider } = connection;
+    awareness.off('change', provider._awarenessUpdateHandler);
+    if (['change', 'update'].some((event) => awareness._observers.get(event)?.has(provider._awarenessUpdateHandler)))
+      throw new Error('The mirror provider still forwards awareness; y-partyserver changed how it subscribes, review useMirror.');
     const yStrokes = doc.getArray<Stroke>('strokes');
     const drafts = new Map<number, Stroke>();
     const samples: number[] = [];
@@ -76,18 +78,15 @@ export function useMirror(room: string, outbox: Outbox | null, enabled: boolean,
       else if (paintTimer === undefined) paintTimer = setTimeout(paint, wait);
     };
 
-    const stopStatus = trackStatus(
-      provider,
+    const stopStatus = superviseConnection(
+      connection,
       (status) => patch({ status }),
       () => {
         openedAt = performance.now();
       },
     );
 
-    const onSynced = (synced: boolean) => {
-      patch({ synced });
-      if (synced) outbox.reannounce();
-    };
+    const onSynced = (synced: boolean) => patch({ synced });
     provider.on('synced', onSynced);
 
     const onStrokes = (event: Y.YArrayEvent<Stroke>) => {
@@ -123,7 +122,7 @@ export function useMirror(room: string, outbox: Outbox | null, enabled: boolean,
       yStrokes.unobserve(onStrokes);
       awareness.off('change', onChange);
       awareness.off('update', onUpdate);
-      provider.destroy();
+      connection.close();
       doc.destroy();
     };
   }, [room, outbox, enabled]);

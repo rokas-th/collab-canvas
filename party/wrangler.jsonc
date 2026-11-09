@@ -1,0 +1,17 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "collab-canvas-sync",
+  "main": "whiteboard.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "collab-canvas-sync.rokass.org", "custom_domain": true }],
+  "durable_objects": {
+    "bindings": [{ "name": "Whiteboard", "class_name": "Whiteboard" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Whiteboard"] }],
+  "vars": {
+    "ALLOWED_ORIGINS": "https://collab-canvas.rokass.org,https://collab-canvas.pages.dev,https://*.collab-canvas.pages.dev,http://localhost:*"
+  },
+  "observability": { "enabled": true },
+  "dev": { "port": 1999 }
+}

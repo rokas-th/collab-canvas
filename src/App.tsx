@@ -15,6 +15,7 @@ import { MIN_PEN_PX, penSize } from './pen';
 import { useArrivals } from './useArrivals';
 import { useMirror } from './useMirror';
 import { BOARD, useWhiteboard, type Status, type Stroke } from './useWhiteboard';
+import { QUIET_PAUSE_MS } from './connection';
 
 const PORTFOLIO_URL = 'https://rokass.org/work/collab-canvas/';
 const SOURCE_URL = 'https://github.com/rokas-th/collab-canvas';
@@ -24,10 +25,12 @@ const UNFOLD_MS = 2000;
 const FLASH_MS = 420;
 const VERIFIED_MS = 1800;
 
+const ROOM = /^[A-Za-z0-9_-]{1,64}$/;
+
 function getRoom(): string {
   const url = new URL(window.location.href);
   let room = url.searchParams.get('room');
-  if (!room) {
+  if (!room || !ROOM.test(room)) {
     room = Math.random().toString(36).slice(2, 8);
     url.searchParams.set('room', room);
     window.history.replaceState({}, '', url);
@@ -81,16 +84,22 @@ const STATUS_META: Record<Status, { color: string; label: string; pill: string |
   connected: { color: '#10b981', label: 'live', pill: null },
   connecting: { color: '#f59e0b', label: 'connecting', pill: 'Connecting to the room…' },
   reconnecting: { color: '#f59e0b', label: 'reconnecting', pill: 'Connection lost — reconnecting…' },
+  paused: {
+    color: '#9ca3af',
+    label: 'paused',
+    pill: `Idle for ${QUIET_PAUSE_MS / 60000} minutes, so this tab left the room. Move or tap to rejoin.`,
+  },
   failed: { color: '#ef4444', label: 'offline', pill: 'Offline — only this browser sees your drawing.' },
 };
 
 const STATUSES = Object.keys(STATUS_META) as Status[];
 
-type HintKey = 'connecting' | 'reconnecting' | 'mirror' | 'plain' | 'failed';
+type HintKey = 'connecting' | 'reconnecting' | 'paused' | 'mirror' | 'plain' | 'failed';
 
 const HINT: Record<HintKey, string> = {
   connecting: 'Connecting to the room. Start drawing now: your strokes sync as soon as it is live.',
   reconnecting: 'The connection dropped and is coming back. Keep drawing: your strokes sync when it is live again.',
+  paused: 'This tab was idle, so it left the room. Move the pointer or tap to rejoin.',
   mirror:
     'The small screen in the corner is a second connection to this room. It shows what anyone you share the link with would see.',
   plain: 'Open this room in a second tab or on your phone. Strokes and cursors show up there as you draw.',
@@ -226,10 +235,12 @@ export default function App() {
     status === 'failed' ? 'unreachable' : mirrorOff ? 'off' : mirror.status === 'failed' ? 'unreachable' : 'live';
   const mirrorReason = status === 'failed' ? 'server unreachable' : 'the mirror can’t connect';
   const mirrorCaption = mirror.synced
-    ? `${mirror.rtt === null ? '—' : mirror.rtt < 10 ? mirror.rtt.toFixed(1) : Math.round(mirror.rtt)} ms via PartyKit`
-    : status === 'reconnecting' || mirror.status === 'reconnecting'
-      ? 'reconnecting to PartyKit…'
-      : 'connecting to PartyKit…';
+    ? `${mirror.rtt === null ? '—' : mirror.rtt < 10 ? mirror.rtt.toFixed(1) : Math.round(mirror.rtt)} ms via Cloudflare`
+    : status === 'paused' || mirror.status === 'paused'
+      ? 'paused while idle'
+      : status === 'reconnecting' || mirror.status === 'reconnecting'
+        ? 'reconnecting to Cloudflare…'
+        : 'connecting to Cloudflare…';
 
   const undoLast = useCallback(() => {
     undo();

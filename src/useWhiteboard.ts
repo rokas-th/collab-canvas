@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Y from 'yjs';
-import YPartyKitProvider from 'y-partykit/provider';
-import { HOST, trackStatus, type Status } from './connection';
+import { openRoom, superviseConnection, trackRoomActivity, type Status } from './connection';
 import {
   createPresence,
   isStroke,
@@ -31,7 +30,6 @@ export interface Outbox {
   clientID: number;
   awareness: Map<number, number>;
   strokes: Map<string, number>;
-  reannounce: () => void;
 }
 
 function remember<K>(log: Map<K, number>, key: K) {
@@ -73,7 +71,8 @@ export function useWhiteboard(room: string): UseWhiteboard {
 
   useEffect(() => {
     const doc = new Y.Doc();
-    const provider = new YPartyKitProvider(HOST, room, doc);
+    const connection = openRoom(room, doc);
+    const { provider } = connection;
     const yStrokes = doc.getArray<Stroke>('strokes');
     const undoManager = new Y.UndoManager(yStrokes, { captureTimeout: 0 });
     const awareness = provider.awareness;
@@ -99,14 +98,8 @@ export function useWhiteboard(room: string): UseWhiteboard {
     undoManager.on('stack-item-popped', syncUndo);
     undoManager.on('stack-cleared', syncUndo);
 
-    const reannounce = () => {
-      awareness.meta.forEach((_, id) => {
-        if (id !== awareness.clientID && !awareness.states.has(id)) awareness.meta.delete(id);
-      });
-      const local = awareness.getLocalState();
-      if (local !== null) awareness.setLocalState(local);
-    };
-    const stopStatus = trackStatus(provider, setStatus, reannounce);
+    const stopStatus = superviseConnection(connection, setStatus);
+    const stopActivity = trackRoomActivity(provider);
 
     const onSynced = (state: boolean) => setSynced(state);
     provider.on('synced', onSynced);
@@ -115,10 +108,6 @@ export function useWhiteboard(room: string): UseWhiteboard {
       clientID: awareness.clientID,
       awareness: new Map(),
       strokes: new Map(),
-      reannounce: () => {
-        const local = awareness.getLocalState();
-        if (local !== null) awareness.setLocalState(local);
-      },
     };
     const onLocalUpdate = (_: unknown, origin: unknown) => {
       if (origin !== 'local') return;
@@ -152,6 +141,7 @@ export function useWhiteboard(room: string): UseWhiteboard {
 
     return () => {
       stopStatus();
+      stopActivity();
       presence.dispose();
       window.removeEventListener('pageshow', onPageShow);
       yStrokes.unobserve(syncStrokes);
@@ -160,7 +150,7 @@ export function useWhiteboard(room: string): UseWhiteboard {
       awareness.off('update', onLocalUpdate);
       provider.off('synced', onSynced);
       undoManager.destroy();
-      provider.destroy();
+      connection.close();
       doc.destroy();
     };
   }, [room, me]);
