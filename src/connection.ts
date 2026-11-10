@@ -84,7 +84,7 @@ export function trackRoomActivity(provider: YProvider): () => void {
   };
 }
 
-type ProviderOptions = Omit<NonNullable<ConstructorParameters<typeof YProvider>[3]>, 'party' | 'connect'>;
+type ProviderOptions = Omit<NonNullable<ConstructorParameters<typeof YProvider>[3]>, 'party' | 'connect' | 'params'>;
 
 export interface RoomConnection {
   provider: YProvider;
@@ -107,8 +107,28 @@ function forwardOwnPresenceOnly(provider: YProvider) {
   provider._awarenessUpdateHandler = forwardOwn;
 }
 
+function requireFreshConnectionId(provider: YProvider) {
+  provider.on('status', ({ status }: { status: string }) => {
+    if (status !== 'connected') return;
+    const sent = provider.ws ? new URL(provider.ws.url).searchParams.get('_pk') : null;
+    if (sent !== provider.id)
+      throw new Error(
+        `Room ${provider.roomname} opened a socket with connection id ${sent} instead of the fresh ${provider.id}; y-partyserver changed how it builds the URL, review openRoom in src/connection.ts.`,
+      );
+  });
+}
+
 export function openRoom(room: string, doc: Y.Doc, options: ProviderOptions = {}): RoomConnection {
-  const provider = new YProvider(HOST, room, doc, { ...options, party: PARTY, connect: false });
+  const provider: YProvider = new YProvider(HOST, room, doc, {
+    ...options,
+    party: PARTY,
+    connect: false,
+    params: () => {
+      provider.id = crypto.randomUUID();
+      return {};
+    },
+  });
+  requireFreshConnectionId(provider);
   forwardOwnPresenceOnly(provider);
   let settled = provider.connect();
   const after = (step: () => void | Promise<void>) => {
