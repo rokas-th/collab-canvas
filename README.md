@@ -16,6 +16,8 @@ npm run party   # the Worker on :1999, local SQLite in .wrangler/
 npm run dev     # the site on :5173, in a second terminal
 ```
 
+`npm run build` needs `VITE_SYNC_HOST`; for a local production build copy `.env.example` to `.env.production.local` (ignored by `*.local`).
+
 `npm run type-check` (`tsc -b` over the app, the Vite config and the Worker) and `npm run lint` are the checks.
 
 ## Deploy

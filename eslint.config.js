@@ -31,4 +31,12 @@ export default tseslint.config(
       globals: globals.serviceworker,
     },
   },
+  {
+    files: ['vite.config.ts'],
+    extends: [js.configs.recommended, ...tseslint.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      globals: globals.node,
+    },
+  },
 );
