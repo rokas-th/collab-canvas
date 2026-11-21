@@ -2,6 +2,7 @@
   "name": "collab-canvas",
   "private": true,
   "version": "0.3.2",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
